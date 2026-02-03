@@ -95,192 +95,211 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onCom
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  // --- Helper: Get Video Metadata & Frame (Optimized for Memory) ---
-  const extractVideoData = async (file: File): Promise<{
+  // --- New Logic: Helper to wait for seek ---
+  const seekTo = (video: HTMLVideoElement, time: number): Promise<void> => {
+    return new Promise((resolve) => {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = time;
+    });
+  };
+
+  // --- Helper: Run Detection directly on Video Element (Fastest) ---
+  const detectPersonOnVideoFrame = async (video: HTMLVideoElement): Promise<boolean> => {
+    if (!detectorRef.current) return false;
+    try {
+      // COCO-SSD can take a video element directly! No canvas conversion needed.
+      const predictions = await detectorRef.current.detect(video);
+      const person = predictions.find((p: any) => p.class === 'person');
+      return !!person;
+    } catch (e) {
+      console.warn("Detection failed on frame", e);
+      return false;
+    }
+  };
+
+  // --- Advanced Video Processor: Multi-frame Scanning ---
+  const processSingleVideo = async (file: File): Promise<{
     durationStr: string;
     orientation: 'portrait' | 'landscape';
     width: number;
     height: number;
     thumbnailBase64: string;
+    hasHuman: boolean;
   }> => {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       const video = document.createElement('video');
       video.preload = 'metadata';
       video.src = URL.createObjectURL(file);
       video.muted = true;
       video.playsInline = true;
-
-      // Timeout safety
-      const timeoutId = setTimeout(() => {
+      // Hidden off-screen, but needed for rendering
+      video.width = 360; // Force low resolution for processing to save memory
+      
+      const cleanup = () => {
         URL.revokeObjectURL(video.src);
-        reject(new Error("Video load timeout"));
-      }, 10000);
-
-      video.onloadedmetadata = () => {
-        // Seek to 0.5s to get a valid frame
-        video.currentTime = 0.5;
+        video.remove();
       };
 
-      video.onseeked = () => {
-        clearTimeout(timeoutId);
-        
-        // --- OPTIMIZATION: Resize Canvas ---
-        // Large videos (4K) create massive Base64 strings that crash LocalStorage/Memory.
-        // We resize thumbnails to a max width (e.g., 360px) which is enough for the grid.
-        const MAX_THUMB_WIDTH = 360;
-        const scale = Math.min(1, MAX_THUMB_WIDTH / video.videoWidth);
-        const drawWidth = video.videoWidth * scale;
-        const drawHeight = video.videoHeight * scale;
+      video.onloadedmetadata = async () => {
+        try {
+          const duration = video.duration || 0;
+          
+          // 1. Determine Scan Points Strategy
+          // Logic:
+          // < 5s: Every 1s
+          // 5-20s: Every 2s
+          // > 20s: Every 5s
+          // + Always check Start(0), Middle, End
+          
+          const pointsSet = new Set<number>();
+          
+          // Mandatory Points
+          pointsSet.add(0);
+          pointsSet.add(duration / 2);
+          pointsSet.add(Math.max(0, duration - 0.1)); // End
 
-        const canvas = document.createElement('canvas');
-        canvas.width = drawWidth;
-        canvas.height = drawHeight;
-        
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, drawWidth, drawHeight);
+          // Interval Points
+          let interval = 5;
+          if (duration < 5) {
+             interval = 1;
+          } else if (duration <= 20) {
+             interval = 2;
+          }
+
+          for (let t = 0; t < duration; t += interval) {
+             pointsSet.add(t);
+          }
+
+          // Convert to sorted array
+          const uniquePoints = Array.from(pointsSet)
+             .filter(t => t >= 0 && t <= duration)
+             .sort((a, b) => a - b);
           
-          // --- OPTIMIZATION: Compress JPEG ---
-          // Use JPEG at 0.6 quality instead of PNG. Drastically reduces size.
-          const thumbnailBase64 = canvas.toDataURL('image/jpeg', 0.6);
-          
-          const durationStr = formatDuration(video.duration || 0);
-          const orientation = video.videoWidth < video.videoHeight ? 'portrait' : 'landscape';
-          
-          // Clean up video element immediately
-          URL.revokeObjectURL(video.src);
-          video.remove();
+          let foundHuman = false;
+          let thumbnailBase64 = '';
+          const originalWidth = video.videoWidth;
+          const originalHeight = video.videoHeight;
+
+          // 2. Loop through scan points
+          for (let i = 0; i < uniquePoints.length; i++) {
+            await seekTo(video, uniquePoints[i]);
+            
+            // A. AI Detection (Stop if already found)
+            if (!foundHuman) {
+               foundHuman = await detectPersonOnVideoFrame(video);
+            }
+
+            // B. Capture Thumbnail
+            // We capture at index 0 (start) by default. 
+            // If index 0 is black/empty, we could potentially update it if a later frame is better, 
+            // but for consistency we stick to the start or the first scan point.
+            // Using the first scan point (0s) matches the "第0帧" requirement.
+            if (i === 0) {
+              const MAX_THUMB_WIDTH = 360;
+              const scale = Math.min(1, MAX_THUMB_WIDTH / originalWidth);
+              const drawWidth = originalWidth * scale;
+              const drawHeight = originalHeight * scale;
+
+              const canvas = document.createElement('canvas');
+              canvas.width = drawWidth;
+              canvas.height = drawHeight;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(video, 0, 0, drawWidth, drawHeight);
+                // Quality 0.6 JPEG
+                thumbnailBase64 = canvas.toDataURL('image/jpeg', 0.6);
+              }
+            }
+
+            // Break loop early if we found a human AND we have a thumbnail
+            if (foundHuman && thumbnailBase64) {
+               break;
+            }
+          }
 
           resolve({
-            durationStr,
-            orientation,
-            width: video.videoWidth,
-            height: video.videoHeight,
-            thumbnailBase64
+            durationStr: formatDuration(duration),
+            orientation: originalWidth < originalHeight ? 'portrait' : 'landscape',
+            width: originalWidth,
+            height: originalHeight,
+            thumbnailBase64,
+            hasHuman: foundHuman
           });
-        } else {
-          URL.revokeObjectURL(video.src);
-          reject(new Error("Canvas context error"));
+          cleanup();
+
+        } catch (e) {
+          reject(e);
+          cleanup();
         }
       };
 
       video.onerror = () => {
-        clearTimeout(timeoutId);
-        URL.revokeObjectURL(video.src);
         reject(new Error("Video load error"));
+        cleanup();
       };
-    });
-  };
-
-  // --- Helper: Local Object Detection (YOLO-like via COCO-SSD) ---
-  const analyzeImageWithLocalModel = async (base64Image: string): Promise<{ hasHuman: boolean }> => {
-    if (!detectorRef.current) {
-      if (window.cocoSsd) {
-        try {
-           detectorRef.current = await window.cocoSsd.load();
-        } catch(e) { 
-           console.warn("Model load failed", e);
-           return { hasHuman: false };
-        }
-      } else {
-        return { hasHuman: false };
-      }
-    }
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.src = base64Image;
-      img.onload = async () => {
-        try {
-          const predictions = await detectorRef.current.detect(img);
-          const person = predictions.find((p: any) => p.class === 'person');
-          resolve({ hasHuman: !!person });
-        } catch (e) {
-          console.error("Detection error:", e);
-          resolve({ hasHuman: false });
-        } finally {
-            // Help GC
-            img.src = ''; 
-        }
-      };
-      img.onerror = () => {
-        resolve({ hasHuman: false });
-      }
     });
   };
 
   const processFiles = async () => {
-    const totalSteps = selectedFiles.length * 3; // Upload -> Extract -> Analyze
-    let completedSteps = 0;
-
-    const updateProgress = () => {
-      completedSteps++;
-      setProgress((completedSteps / totalSteps) * 100);
-    };
+    const totalFiles = selectedFiles.length;
+    let completedFiles = 0;
 
     const finalProjectId = targetProjectId ? parseInt(targetProjectId) : undefined;
-    const targetProjectName = projects.find(p => p.id === finalProjectId)?.name || "默认库";
 
-    // Process one by one to save memory
+    // Process one by one
     for (let i = 0; i < selectedFiles.length; i++) {
       const file = selectedFiles[i];
-      // Create ObjectURL only when needed
       
-      addLog(`[${i+1}/${selectedFiles.length}] 读取文件: ${file.name}`, 'loading');
-      await new Promise(r => setTimeout(r, 100)); // Small yield to let UI breathe
-      updateProgress();
+      addLog(`[${i+1}/${totalFiles}] 分析视频内容: ${file.name}`, 'loading');
+      // Update progress bar based on file count
+      setProgress(((i) / totalFiles) * 100);
       
       try {
-        // Step 2: Extract Metadata & Thumbnail
-        addLog(`生成优化的缩略图...`, 'loading');
-        // Note: extractVideoData handles ObjectURL creation/revocation internally now
-        const metadata = await extractVideoData(file);
-        updateProgress();
-
-        // Step 3: AI Analysis (Local Model)
-        addLog(`正在进行 AI 分析...`, 'ai');
-        const aiResult = await analyzeImageWithLocalModel(metadata.thumbnailBase64);
-        updateProgress();
-
-        // Step 4: Finalize
-        const typeStr = metadata.orientation === 'portrait' ? '竖屏' : '横屏';
-        const humanStr = aiResult.hasHuman ? '有人像' : '空镜';
+        await new Promise(r => setTimeout(r, 50)); // UI breathe
         
+        // Combined Processing: Extract + Multi-frame AI Scan
+        const result = await processSingleVideo(file);
+        
+        const typeStr = result.orientation === 'portrait' ? '竖屏' : '横屏';
+        const humanStr = result.hasHuman ? '有人像' : '空镜';
+        addLog(`分析结果: ${typeStr} / ${humanStr}`, 'ai');
+
         const colors = ["bg-orange-100", "bg-blue-100", "bg-pink-100", "bg-teal-100", "bg-yellow-50", "bg-gray-200", "bg-red-50", "bg-green-100", "bg-purple-100"];
         const randomColor = colors[Math.floor(Math.random() * colors.length)];
-        
-        const heightClass = metadata.orientation === 'portrait' ? "aspect-[9/16]" : "aspect-video";
+        const heightClass = result.orientation === 'portrait' ? "aspect-[9/16]" : "aspect-video";
         
         const videoId = Date.now() + Math.random();
 
-        // Save binary blob to IDB
-        addLog(`写入本地数据库...`, 'loading');
+        // Save binary
+        addLog(`存入数据库...`, 'loading');
         await saveVideoFile(videoId, file);
 
-        // Construct video object
-        // Create a temporary URL for immediate feedback, App.tsx handles hydration later
         const tempUrl = URL.createObjectURL(file); 
         
         const newVideo: Video = {
           id: videoId,
           title: file.name,
-          duration: metadata.durationStr,
-          orientation: metadata.orientation,
-          hasHuman: aiResult.hasHuman,
+          duration: result.durationStr,
+          orientation: result.orientation,
+          hasHuman: result.hasHuman,
           color: randomColor,
           heightClass: heightClass,
           uploadDate: new Date().toISOString().split('T')[0],
           url: tempUrl,
-          thumbnail: metadata.thumbnailBase64,
+          thumbnail: result.thumbnailBase64,
           projectId: finalProjectId
         };
 
-        // --- KEY FIX: INCREMENTAL SAVE ---
-        // Send this SINGLE video to parent immediately. 
-        // This ensures if the browser crashes on the next video, this one is saved.
+        // Incremental save
         onComplete([newVideo]);
-
-        addLog(`处理完成: ${file.name} -> 已保存`, 'done');
+        
+        completedFiles++;
+        setProgress((completedFiles / totalFiles) * 100);
+        addLog(`完成: ${file.name}`, 'done');
 
       } catch (err: any) {
         let errorMsg = `处理失败: ${file.name}`;
@@ -294,11 +313,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onCom
       }
     }
 
-    setStatusText('队列全部结束');
+    setStatusText('处理完成');
     setProgress(100);
     setUploadState('complete');
     
-    // Auto close after delay
     setTimeout(onClose, 1500);
   };
 
