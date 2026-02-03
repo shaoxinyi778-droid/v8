@@ -1,0 +1,5 @@
+{
+  "name": "SmartClip Hub",
+  "description": "A smart video asset management library with AI categorization, batch processing, and masonry grid layout.",
+  "requestFramePermissions": []
+}
