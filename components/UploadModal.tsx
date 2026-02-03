@@ -15,9 +15,17 @@ interface UploadModalProps {
   onComplete: (newVideos: Video[]) => void;
   projects?: Project[];
   initialProjectId?: number;
+  existingVideos: Video[]; // Added to check for duplicates
 }
 
-export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onComplete, projects = [], initialProjectId }) => {
+export const UploadModal: React.FC<UploadModalProps> = ({ 
+  isOpen, 
+  onClose, 
+  onComplete, 
+  projects = [], 
+  initialProjectId,
+  existingVideos 
+}) => {
   const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'complete'>('idle');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [targetProjectId, setTargetProjectId] = useState<string>(''); // empty string = all/uncategorized
@@ -195,9 +203,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onCom
 
             // B. Capture Thumbnail
             // We capture at index 0 (start) by default. 
-            // If index 0 is black/empty, we could potentially update it if a later frame is better, 
-            // but for consistency we stick to the start or the first scan point.
-            // Using the first scan point (0s) matches the "第0帧" requirement.
             if (i === 0) {
               const MAX_THUMB_WIDTH = 360;
               const scale = Math.min(1, MAX_THUMB_WIDTH / originalWidth);
@@ -249,14 +254,26 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onCom
     let completedFiles = 0;
 
     const finalProjectId = targetProjectId ? parseInt(targetProjectId) : undefined;
+    
+    // --- OPTIMIZATION: Duplicate Detection Set ---
+    // Start with filenames already in the library, and add as we process
+    const processedFileNames = new Set(existingVideos.map(v => v.title));
 
     // Process one by one
     for (let i = 0; i < selectedFiles.length; i++) {
       const file = selectedFiles[i];
       
-      addLog(`[${i+1}/${totalFiles}] 分析视频内容: ${file.name}`, 'loading');
       // Update progress bar based on file count
       setProgress(((i) / totalFiles) * 100);
+
+      // 1. Check Duplicates
+      if (processedFileNames.has(file.name)) {
+        addLog(`跳过: ${file.name} (已存在)`, 'done'); // Using 'done' style (gray) for skipped
+        completedFiles++;
+        continue; // Skip to next file
+      }
+      
+      addLog(`[${i+1}/${totalFiles}] 分析视频内容: ${file.name}`, 'loading');
       
       try {
         await new Promise(r => setTimeout(r, 50)); // UI breathe
@@ -293,6 +310,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onCom
           thumbnail: result.thumbnailBase64,
           projectId: finalProjectId
         };
+
+        // Mark as processed to prevent duplicates within the same batch
+        processedFileNames.add(file.name);
 
         // Incremental save
         onComplete([newVideo]);
