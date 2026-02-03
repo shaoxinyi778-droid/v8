@@ -300,18 +300,39 @@ function App() {
     setSelectedIds(new Set());
   };
 
-  const handleBatchDelete = () => {
+  const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return showToast('请先选择视频', 'error');
-    if (!window.confirm(`确定要将选中的 ${selectedIds.size} 个视频移至回收站吗？`)) return;
 
-    setVideos(prev => prev.map(v => {
-      if (selectedIds.has(v.id)) {
-        return { ...v, isDeleted: true };
-      }
-      return v;
-    }));
-    
-    showToast(`已将 ${selectedIds.size} 个视频移至回收站`, 'success');
+    // 1. Permanent Delete if in Trash
+    if (currentFolder === 'trash') {
+      if (!window.confirm(`确定要彻底删除选中的 ${selectedIds.size} 个视频吗？此操作无法撤销。`)) return;
+
+      // Iterate and delete from DB
+      const idsToDelete = Array.from(selectedIds) as number[];
+      
+      // We use Promise.all to process concurrent DB deletions (IndexedDB handles concurrency well)
+      await Promise.all(idsToDelete.map(id => deleteVideoFile(id)));
+      
+      // Update State
+      setVideos(prev => prev.filter(v => !selectedIds.has(v.id)));
+      
+      showToast(`已彻底删除 ${selectedIds.size} 个视频`, 'success');
+      updateStorageInfo(); // Update quota usage
+
+    } else {
+      // 2. Soft Delete (Move to Trash)
+      if (!window.confirm(`确定要将选中的 ${selectedIds.size} 个视频移至回收站吗？`)) return;
+
+      setVideos(prev => prev.map(v => {
+        if (selectedIds.has(v.id)) {
+          return { ...v, isDeleted: true };
+        }
+        return v;
+      }));
+      
+      showToast(`已将 ${selectedIds.size} 个视频移至回收站`, 'success');
+    }
+
     setIsSelectionMode(false);
     setSelectedIds(new Set());
   };
@@ -504,6 +525,7 @@ function App() {
         onComplete={handleUploadComplete}
         projects={projects}
         initialProjectId={currentFolder.startsWith('project-') ? parseInt(currentFolder.split('-')[1]) : undefined}
+        existingVideos={videos}
       />
 
       <DetailModal 
