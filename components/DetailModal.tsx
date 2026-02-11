@@ -138,6 +138,12 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                    ? <span className="bg-pink-100 text-pink-700 px-3 py-1 rounded text-xs font-medium"># 包含人物</span>
                    : <span className="bg-green-100 text-green-700 px-3 py-1 rounded text-xs font-medium"># 自然空镜</span>
                 }
+                {video.hasSubtitle === undefined
+                   ? <span className="bg-gray-100 text-gray-600 px-3 py-1 rounded text-xs font-medium"># 字幕状态未知</span>
+                   : video.hasSubtitle
+                     ? <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded text-xs font-medium"># 检测到字幕</span>
+                     : <span className="bg-slate-100 text-slate-700 px-3 py-1 rounded text-xs font-medium"># 未检测到字幕</span>
+                }
               </div>
               <button className="mt-3 text-xs text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-1">
                 <i className="fa-solid fa-plus"></i> 添加人工标签

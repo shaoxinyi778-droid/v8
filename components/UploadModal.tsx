@@ -129,6 +129,92 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     }
   };
 
+
+
+  const detectTextLikeRegion = (ctx: CanvasRenderingContext2D, width: number, height: number): boolean => {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    const gray = new Uint8ClampedArray(width * height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      gray[p] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    }
+
+    let edgeCount = 0;
+    const rowHits = new Uint16Array(height);
+
+    for (let y = 1; y < height - 1; y++) {
+      const rowOffset = y * width;
+      for (let x = 1; x < width - 1; x++) {
+        const idx = rowOffset + x;
+        const gx = Math.abs(gray[idx + 1] - gray[idx - 1]);
+        if (gx > 25) {
+          edgeCount++;
+          rowHits[y] += 1;
+        }
+      }
+    }
+
+    const totalPixels = width * height;
+    const edgeDensity = edgeCount / totalPixels;
+    if (edgeDensity < 0.03 || edgeDensity > 0.35) return false;
+
+    const minBandHeight = Math.max(10, Math.floor(height * 0.05));
+    const maxBandHeight = Math.floor(height * 0.25);
+
+    for (let start = 0; start < height; start += 2) {
+      let sum = 0;
+      for (let bandHeight = 1; bandHeight <= maxBandHeight && start + bandHeight < height; bandHeight++) {
+        sum += rowHits[start + bandHeight - 1];
+
+        if (bandHeight < minBandHeight) continue;
+
+        const avgPerRow = sum / bandHeight;
+        if (avgPerRow < width * 0.35) continue;
+
+        const aspect = width / bandHeight;
+        if (aspect >= 6) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  const detectSubtitleFromVideo = async (video: HTMLVideoElement, duration: number): Promise<boolean> => {
+    const sampleWidth = 320;
+    const sampleHeight = Math.max(180, Math.round(sampleWidth * (video.videoHeight / Math.max(1, video.videoWidth))));
+    const canvas = document.createElement('canvas');
+    canvas.width = sampleWidth;
+    canvas.height = sampleHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return false;
+
+    const frameStepSec = 0.4;
+    const minSubDurationSec = 1.0;
+
+    let streak = 0;
+    let maxStreak = 0;
+
+    for (let t = 0; t <= duration; t += frameStepSec) {
+      await seekTo(video, Math.min(duration, t));
+      ctx.drawImage(video, 0, 0, sampleWidth, sampleHeight);
+
+      if (detectTextLikeRegion(ctx, sampleWidth, sampleHeight)) {
+        streak += 1;
+        maxStreak = Math.max(maxStreak, streak);
+      } else {
+        streak = 0;
+      }
+    }
+
+    return maxStreak * frameStepSec >= minSubDurationSec;
+  };
+
   // --- Advanced Video Processor: Multi-frame Scanning ---
   const processSingleVideo = async (file: File): Promise<{
     durationStr: string;
@@ -137,6 +223,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     height: number;
     thumbnailBase64: string;
     hasHuman: boolean;
+    hasSubtitle: boolean;
   }> => {
     return new Promise(async (resolve, reject) => {
       const video = document.createElement('video');
@@ -188,6 +275,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
              .sort((a, b) => a - b);
           
           let foundHuman = false;
+          let subtitleDetected = false;
           let thumbnailBase64 = '';
           const originalWidth = video.videoWidth;
           const originalHeight = video.videoHeight;
@@ -201,7 +289,12 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                foundHuman = await detectPersonOnVideoFrame(video);
             }
 
-            // B. Capture Thumbnail
+            // B. Subtitle-like text detection (run once after first frame is available)
+            if (!subtitleDetected && i >= 1) {
+              subtitleDetected = await detectSubtitleFromVideo(video, duration);
+            }
+
+            // C. Capture Thumbnail
             // We capture at index 0 (start) by default. 
             if (i === 0) {
               const MAX_THUMB_WIDTH = 360;
@@ -220,8 +313,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               }
             }
 
-            // Break loop early if we found a human AND we have a thumbnail
-            if (foundHuman && thumbnailBase64) {
+            // Break loop early if we found all required signals
+            if (foundHuman && subtitleDetected && thumbnailBase64) {
                break;
             }
           }
@@ -232,7 +325,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
             width: originalWidth,
             height: originalHeight,
             thumbnailBase64,
-            hasHuman: foundHuman
+            hasHuman: foundHuman,
+            hasSubtitle: subtitleDetected
           });
           cleanup();
 
@@ -283,7 +377,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         
         const typeStr = result.orientation === 'portrait' ? '竖屏' : '横屏';
         const humanStr = result.hasHuman ? '有人像' : '空镜';
-        addLog(`分析结果: ${typeStr} / ${humanStr}`, 'ai');
+        const subtitleStr = result.hasSubtitle ? '有字幕' : '无字幕';
+        addLog(`分析结果: ${typeStr} / ${humanStr} / ${subtitleStr}`, 'ai');
 
         const colors = ["bg-orange-100", "bg-blue-100", "bg-pink-100", "bg-teal-100", "bg-yellow-50", "bg-gray-200", "bg-red-50", "bg-green-100", "bg-purple-100"];
         const randomColor = colors[Math.floor(Math.random() * colors.length)];
@@ -303,6 +398,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           duration: result.durationStr,
           orientation: result.orientation,
           hasHuman: result.hasHuman,
+          hasSubtitle: result.hasSubtitle,
           color: randomColor,
           heightClass: heightClass,
           uploadDate: new Date().toISOString().split('T')[0],
