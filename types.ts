@@ -5,6 +5,7 @@ export interface Video {
   duration: string;
   orientation: 'portrait' | 'landscape';
   hasHuman: boolean;
+  hasSubtitle?: boolean;
   color: string;
   heightClass: string; // Tailwind height class for masonry simulation
   uploadDate: string;

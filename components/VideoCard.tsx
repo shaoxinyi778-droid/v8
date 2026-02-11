@@ -119,6 +119,12 @@ export const VideoCard: React.FC<VideoCardProps> = ({ video, isSelected, isSelec
             ? <span className="text-[10px] bg-pink-100 text-pink-600 px-2 py-0.5 rounded-full">#有人像</span>
             : <span className="text-[10px] bg-green-100 text-green-600 px-2 py-0.5 rounded-full">#空镜</span>
           }
+          {video.hasSubtitle === undefined
+            ? <span className="text-[10px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">#字幕未知</span>
+            : video.hasSubtitle
+              ? <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">#有字幕</span>
+              : <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">#无字幕</span>
+          }
         </div>
       </div>
     </div>
